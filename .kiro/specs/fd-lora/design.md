@@ -20,9 +20,11 @@ graph TB
     end
     
     subgraph "Backend Abstraction"
-        BACKEND[Backend Interface]
-        TRITON[Triton Backend]
+        BACKEND[Backend Manager]
         CUDA[CUDA Backend]
+        TRITON[Triton Backend]
+        CUTLASS[Cutlass Backend]
+        PYTORCH[PyTorch Fallback]
     end
     
     subgraph "C++/CUDA Layer (csrc/)"
@@ -35,8 +37,10 @@ graph TB
     PEFT --> API
     CONFIG --> LOADER
     LOADER --> API
-    BACKEND --> TRITON
     BACKEND --> CUDA
+    BACKEND --> TRITON
+    BACKEND --> CUTLASS
+    BACKEND --> PYTORCH
     CUDA --> KERNELS
     KERNELS --> MEMORY
     KERNELS --> VARIANTS
@@ -190,6 +194,130 @@ class CutlassBackend(BackendInterface):
                    variant_type: LoRAVariant, **kwargs) -> torch.Tensor:
         """Use Cutlass optimized GEMM for LoRA computation."""
         pass
+
+class PyTorchFallbackBackend(BackendInterface):
+    """Fallback backend using standard PyTorch operations."""
+    
+    def __init__(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    def apply_lora(self, base_weight: torch.Tensor, 
+                   lora_a: torch.Tensor, lora_b: torch.Tensor,
+                   variant_type: LoRAVariant, **kwargs) -> torch.Tensor:
+        """Apply LoRA using standard PyTorch operations."""
+        if variant_type == LoRAVariant.STANDARD:
+            return base_weight + (lora_b @ lora_a)
+        elif variant_type == LoRAVariant.DORA:
+            return self._apply_dora_pytorch(base_weight, lora_a, lora_b, **kwargs)
+        else:
+            raise VariantError(f"Unsupported variant {variant_type} in fallback backend")
+    
+    def batch_apply_lora(self, base_weights: List[torch.Tensor],
+                        adapters: List[LoRAAdapter]) -> List[torch.Tensor]:
+        """Apply multiple LoRA adapters using PyTorch operations."""
+        results = []
+        for base_weight, adapter in zip(base_weights, adapters):
+            result = self.apply_lora(
+                base_weight, adapter.lora_a, adapter.lora_b, 
+                adapter.variant_type, **adapter.params
+            )
+            results.append(result)
+        return results
+    
+    def is_available(self) -> bool:
+        """PyTorch fallback is always available."""
+        return True
+    
+    def get_memory_requirements(self, adapter: LoadedAdapter) -> int:
+        """Calculate memory requirements for PyTorch operations."""
+        total_params = sum(tensor.numel() for tensor in adapter.weights.values())
+        return total_params * adapter.weights[list(adapter.weights.keys())[0]].element_size()
+    
+    def _apply_dora_pytorch(self, base_weight: torch.Tensor,
+                           lora_a: torch.Tensor, lora_b: torch.Tensor,
+                           **kwargs) -> torch.Tensor:
+        """Apply DoRA using PyTorch operations."""
+        # DoRA implementation using standard PyTorch
+        magnitude = kwargs.get('magnitude_vector')
+        direction = base_weight / torch.norm(base_weight, dim=0, keepdim=True)
+        lora_output = lora_b @ lora_a
+        return magnitude * (direction + lora_output)
+
+class BackendManager:
+    """Manages backend selection and fallback logic."""
+    
+    def __init__(self, config: BackendConfig):
+        self.config = config
+        self.available_backends = {}
+        self.active_backend = None
+        self._initialize_backends()
+    
+    def _initialize_backends(self) -> None:
+        """Initialize and test all available backends."""
+        backend_classes = {
+            "cuda": CUDABackend,
+            "triton": TritonBackend,
+            "cutlass": CutlassBackend,
+            "pytorch": PyTorchFallbackBackend
+        }
+        
+        # Test each backend availability
+        for name, backend_class in backend_classes.items():
+            try:
+                backend = backend_class()
+                if backend.is_available():
+                    self.available_backends[name] = backend
+                    print(f"Backend '{name}' is available")
+                else:
+                    print(f"Backend '{name}' is not available")
+            except Exception as e:
+                print(f"Failed to initialize backend '{name}': {e}")
+        
+        # Select active backend
+        self._select_active_backend()
+    
+    def _select_active_backend(self) -> None:
+        """Select the best available backend based on preferences."""
+        # Try preferred backend first
+        if (self.config.preferred_backend in self.available_backends):
+            self.active_backend = self.available_backends[self.config.preferred_backend]
+            print(f"Using preferred backend: {self.config.preferred_backend}")
+            return
+        
+        # Try fallback backends in order
+        for fallback in self.config.fallback_backends:
+            if fallback in self.available_backends:
+                self.active_backend = self.available_backends[fallback]
+                print(f"Using fallback backend: {fallback}")
+                return
+        
+        # This should never happen if PyTorch fallback is properly implemented
+        raise RuntimeError("No available backends found")
+    
+    def get_backend(self) -> BackendInterface:
+        """Get the currently active backend."""
+        if self.active_backend is None:
+            raise RuntimeError("No backend is currently active")
+        return self.active_backend
+    
+    def switch_backend(self, backend_name: str) -> bool:
+        """Switch to a different backend if available."""
+        if backend_name in self.available_backends:
+            self.active_backend = self.available_backends[backend_name]
+            print(f"Switched to backend: {backend_name}")
+            return True
+        else:
+            print(f"Backend '{backend_name}' is not available")
+            return False
+    
+    def get_backend_info(self) -> Dict[str, Any]:
+        """Get information about available and active backends."""
+        return {
+            "active_backend": type(self.active_backend).__name__ if self.active_backend else None,
+            "available_backends": list(self.available_backends.keys()),
+            "preferred_backend": self.config.preferred_backend,
+            "fallback_backends": self.config.fallback_backends
+        }
 ```
 
 ### LoRA Variant System
@@ -324,11 +452,12 @@ class AdapterMetadata:
 @dataclass
 class BackendConfig:
     preferred_backend: str = "cuda"
-    fallback_backends: List[str] = field(default_factory=lambda: ["triton", "cutlass"])
+    fallback_backends: List[str] = field(default_factory=lambda: ["triton", "cutlass", "pytorch"])
     memory_pool_size: int = 1024 * 1024 * 1024  # 1GB
     enable_kernel_fusion: bool = True
     max_batch_size: int = 32
     enable_cutlass: bool = False  # Future feature flag
+    always_fallback_available: bool = True  # Ensure PyTorch fallback is always available
 
 @dataclass
 class MemoryConfig:
@@ -495,6 +624,10 @@ class MemoryError(FDLoRAError):
 class OffloadError(FDLoRAError):
     """CPU offloading errors."""
     pass
+
+class FallbackError(FDLoRAError):
+    """Backend fallback errors."""
+    pass
 ```
 
 ### Error Recovery Strategies
@@ -505,6 +638,8 @@ class OffloadError(FDLoRAError):
 4. **Memory Recovery**: Implement memory pool cleanup on CUDA out-of-memory errors
 5. **Offload Recovery**: Automatic CPU offloading when GPU memory is exhausted
 6. **Cache Consistency**: Ensure adapter consistency across GPU/CPU/disk tiers
+7. **Backend Fallback**: Automatic fallback to PyTorch operations when optimized backends fail
+8. **Graceful Degradation**: Maintain functionality even with reduced performance
 
 ## Testing Strategy
 
@@ -525,6 +660,8 @@ class OffloadError(FDLoRAError):
 4. **Performance Regression**: Automated benchmarks to catch performance regressions
 5. **Memory Stress Testing**: Test system behavior with thousands of LoRA adapters
 6. **Offloading Performance**: Benchmark CPU offloading overhead and latency
+7. **Fallback Testing**: Test backend fallback mechanisms and PyTorch compatibility
+8. **Degradation Testing**: Verify functionality when optimized backends are unavailable
 
 ### Numerical Accuracy Testing
 
@@ -594,6 +731,52 @@ class PerformanceBenchmark:
             "adapters_in_gpu": len(memory_manager.gpu_cache),
             "adapters_in_cpu": len(memory_manager.cpu_cache)
         }
+
+class FallbackTest:
+    def test_backend_fallback(self):
+        """Test that the system gracefully falls back to PyTorch when optimized backends fail."""
+        # Simulate CUDA backend failure
+        config = BackendConfig(preferred_backend="cuda", fallback_backends=["pytorch"])
+        
+        # Mock CUDA backend to fail
+        with patch('fd_lora.backends.cuda_backend.CUDABackend.is_available', return_value=False):
+            backend_manager = BackendManager(config)
+            
+            # Should fall back to PyTorch
+            assert isinstance(backend_manager.get_backend(), PyTorchFallbackBackend)
+            
+            # Test that operations still work
+            base_weight = torch.randn(512, 512)
+            lora_a = torch.randn(512, 16)
+            lora_b = torch.randn(16, 512)
+            
+            result = backend_manager.get_backend().apply_lora(
+                base_weight, lora_a, lora_b, LoRAVariant.STANDARD
+            )
+            
+            # Verify numerical correctness
+            expected = base_weight + (lora_b @ lora_a)
+            torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-6)
+    
+    def test_no_cuda_environment(self):
+        """Test system behavior in environments without CUDA."""
+        # Simulate no CUDA environment
+        with patch('torch.cuda.is_available', return_value=False):
+            config = BackendConfig()
+            backend_manager = BackendManager(config)
+            
+            # Should use PyTorch fallback
+            backend = backend_manager.get_backend()
+            assert isinstance(backend, PyTorchFallbackBackend)
+            
+            # Test CPU operations
+            base_weight = torch.randn(256, 256)
+            lora_a = torch.randn(256, 8)
+            lora_b = torch.randn(8, 256)
+            
+            result = backend.apply_lora(base_weight, lora_a, lora_b, LoRAVariant.STANDARD)
+            expected = base_weight + (lora_b @ lora_a)
+            torch.testing.assert_close(result, expected)
 ```
 
 ### C++/CUDA Testing
