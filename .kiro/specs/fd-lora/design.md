@@ -1,5 +1,54 @@
 # Design Document
 
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Architecture](#architecture)
+   - 2.1 [High-Level Architecture](#high-level-architecture)
+   - 2.2 [Directory Structure](#directory-structure)
+3. [Components and Interfaces](#components-and-interfaces)
+   - 3.1 [Memory Management System](#memory-management-system)
+   - 3.2 [Backend Interface](#backend-interface)
+   - 3.3 [LoRA Variant System](#lora-variant-system)
+   - 3.4 [Framework-Agnostic Backend Layer](#framework-agnostic-backend-layer)
+   - 3.5 [PEFT Integration Layer](#peft-integration-layer)
+4. [Data Models](#data-models)
+   - 4.1 [Adapter Configuration](#adapter-configuration)
+   - 4.2 [Runtime Adapter State](#runtime-adapter-state)
+   - 4.3 [Backend Configuration](#backend-configuration)
+5. [Memory Management Architecture](#memory-management-architecture)
+   - 5.1 [Extensible Cache System](#extensible-cache-system)
+   - 5.2 [Cache Strategy Architecture](#cache-strategy-architecture)
+   - 5.3 [Cache Strategy Implementations](#cache-strategy-implementations)
+   - 5.4 [Cache Strategy Selection Guidelines](#cache-strategy-selection-guidelines)
+   - 5.5 [Intelligent LoRA Management](#intelligent-LoRA-management)
+   - 5.6 [Memory Management Strategies](#memory-management-strategies)
+   - 5.7 [CPU Offloading Implementation](#cpu-offloading-implementation)
+6. [Error Handling](#error-handling)
+   - 6.1 [Exception Hierarchy](#exception-hierarchy)
+   - 6.2 [Error Recovery Strategies](#error-recovery-strategies)
+7. [Testing Strategy](#testing-strategy)
+   - 7.1 [Unit Testing](#unit-testing)
+   - 7.2 [Integration Testing](#integration-testing)
+   - 7.3 [Numerical Accuracy Testing](#numerical-accuracy-testing)
+   - 7.4 [Performance Benchmarking](#performance-benchmarking)
+   - 7.5 [C++/CUDA Testing](#ccuda-testing)
+8. [CMake Configuration for IDE Support](#cmake-configuration-for-ide-support)
+   - 8.1 [Root CMakeLists.txt Structure](#root-cmakeliststxt-structure)
+   - 8.2 [Component-Level CMake Files](#component-level-cmake-files)
+   - 8.3 [Benefits of CMake Structure](#benefits-of-cmake-structure)
+9. [Framework-Specific Usage Examples](#framework-specific-usage-examples)
+   - 9.1 [PEFT Integration](#peft-integration)
+   - 9.2 [Universal Integration Manager](#universal-integration-manager)
+   - 9.3 [Cache Strategy Configuration](#cache-strategy-configuration)
+10. [Future Additions](#future-additions)
+    - 10.1 [SGLang Framework Integration](#sglang-framework-integration)
+    - 10.2 [vLLM Framework Integration](#vllm-framework-integration)
+    - 10.3 [Tensor Parallelism Support](#tensor-parallelism-support)
+    - 10.4 [Additional LoRA Variants](#additional-lora-variants)
+    - 10.5 [Enhanced Backends](#enhanced-backends)
+    - 10.6 [Advanced Memory Management](#advanced-memory-management)
+
 ## Overview
 
 The fd-lora library implements a high-performance, inference-only LoRA system with support for multiple LoRA variants. The design emphasizes dynamic adapter application without weight fusion, leveraging optimized CUDA kernels for maximum throughput. The architecture separates Python interface code from C++/CUDA compute kernels, providing clean abstractions while maintaining compatibility with the Hugging Face ecosystem.
@@ -23,7 +72,6 @@ graph TB
         BACKEND[Backend Manager]
         CUDA[CUDA Backend]
         TRITON[Triton Backend]
-        CUTLASS[Cutlass Backend]
         PYTORCH[PyTorch Fallback]
     end
     
@@ -39,7 +87,6 @@ graph TB
     LOADER --> API
     BACKEND --> CUDA
     BACKEND --> TRITON
-    BACKEND --> CUTLASS
     BACKEND --> PYTORCH
     CUDA --> KERNELS
     KERNELS --> MEMORY
@@ -58,8 +105,7 @@ fd-lora/
 │   │   ├── __init__.py
 │   │   ├── base.py            # Abstract backend interface
 │   │   ├── cuda_backend.py    # CUDA backend with SGMV
-│   │   ├── triton_backend.py  # Triton backend with SGMV
-│   │   └── cutlass_backend.py # Cutlass backend with SGMV
+│   │   └── triton_backend.py  # Triton backend with SGMV
 │   ├── kernels/               # Triton kernel implementations
 │   │   ├── __init__.py
 │   │   ├── triton/            # Triton SGMV implementations
@@ -73,21 +119,11 @@ fd-lora/
 │   │   ├── backend_base.py    # FDLoraBackendBase
 │   │   ├── framework_mixin.py # FrameworkAdapterMixin
 │   │   └── memory_manager.py  # Memory management classes
-│   ├── layers/                 # Framework-specific layer implementations
+│   ├── peft/                   # PEFT framework integration
 │   │   ├── __init__.py
-│   │   ├── peft_layers.py     # PEFT-specific FD-LoRA layers
-│   │   ├── sglang_layers.py   # SGLang-specific FD-LoRA layers
-│   │   └── vllm_layers.py     # vLLM-specific FD-LoRA layers
-│   ├── models/                 # Framework-specific model implementations
-│   │   ├── __init__.py
-│   │   ├── peft_models.py     # PEFT FDLoraModel
-│   │   ├── sglang_models.py   # SGLang model integration
-│   │   └── vllm_models.py     # vLLM model integration
-│   ├── integrations/           # Framework integrations
-│   │   ├── __init__.py
-│   │   ├── peft_integration.py
-│   │   ├── sglang_integration.py
-│   │   └── vllm_integration.py
+│   │   ├── layers.py          # FDLoraLayer, FDDoraLayer, etc.
+│   │   ├── models.py          # FDLoraModel
+│   │   └── integration.py     # PEFT-specific integration logic
 │   └── utils/
 │       ├── __init__.py
 │       └── model_utils.py
@@ -99,7 +135,6 @@ fd-lora/
 │   │   │   ├── memory.h
 │   │   │   ├── variants.h
 │   │   │   ├── memory_manager.h
-│   │   │   └── cutlass_integration.h
 │   ├── src/
 │   │   ├── CMakeLists.txt      # Source CMake configuration
 │   │   ├── core/               # CUDA primitives and low-level operations
@@ -114,10 +149,6 @@ fd-lora/
 │   │   │   │   ├── sgmv_dora.cu
 │   │   │   │   ├── sgmv_adalora.cu
 │   │   │   │   └── sgmv_utils.cu
-│   │   │   ├── cutlass/         # Future Cutlass SGMV implementations
-│   │   │   │   ├── sgmv_lora.cu
-│   │   │   │   ├── sgmv_dora.cu
-│   │   │   │   └── sgmv_adalora.cu
 │   │   │   └── fused_ops.cu
 │   │   ├── memory/
 │   │   │   ├── CMakeLists.txt
@@ -233,7 +264,7 @@ class AsyncCPUOffloader:
 
 ### Backend Interface
 
-The backend system provides a unified interface for different compute implementations with future Cutlass support:
+The backend system provides a unified interface for different compute implementations:
 
 ```python
 class BackendInterface(ABC):
@@ -260,39 +291,7 @@ class BackendInterface(ABC):
         """Calculate memory requirements for adapter."""
         pass
 
-class CutlassBackend(BackendInterface):
-    """Future Cutlass backend implementing SGMV algorithm with optimized GEMM operations."""
-    
-    def __init__(self):
-        self.cutlass_available = self._check_cutlass_availability()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    def _check_cutlass_availability(self) -> bool:
-        """Check if Cutlass is available and properly configured."""
-        pass
-    
-    def apply_lora(self, base_weight: torch.Tensor, 
-                   lora_a: torch.Tensor, lora_b: torch.Tensor,
-                   variant_type: LoRAVariant, **kwargs) -> torch.Tensor:
-        """Apply LoRA using SGMV algorithm implemented with Cutlass optimized GEMM."""
-        if variant_type == LoRAVariant.STANDARD:
-            return self._cutlass_sgmv_lora(base_weight, lora_a, lora_b)
-        elif variant_type == LoRAVariant.DORA:
-            return self._cutlass_sgmv_dora(base_weight, lora_a, lora_b, **kwargs)
-        elif variant_type == LoRAVariant.ADALORA:
-            return self._cutlass_sgmv_adalora(base_weight, lora_a, lora_b, **kwargs)
-        else:
-            raise VariantError(f"Unsupported variant {variant_type} in Cutlass backend")
-    
-    def _cutlass_sgmv_lora(self, base_weight: torch.Tensor, lora_a: torch.Tensor, lora_b: torch.Tensor):
-        """Apply standard LoRA using Cutlass SGMV implementation."""
-        # Call Cutlass SGMV kernel for standard LoRA
-        pass
-    
-    def _cutlass_sgmv_dora(self, base_weight: torch.Tensor, lora_a: torch.Tensor, lora_b: torch.Tensor, **kwargs):
-        """Apply DoRA using Cutlass SGMV implementation."""
-        # Call Cutlass SGMV kernel for DoRA
-        pass
+
 
 class TritonBackend(BackendInterface):
     """Triton backend implementing SGMV algorithm."""
@@ -416,7 +415,6 @@ class BackendManager:
         backend_classes = {
             "cuda": CUDABackend,
             "triton": TritonBackend,
-            "cutlass": CutlassBackend,
             "pytorch": PyTorchFallbackBackend
         }
         
@@ -481,7 +479,7 @@ class BackendManager:
 
 ### LoRA Variant System
 
-The variant system inherits from PEFT variants and adds SGMV optimizations:
+To support different LoRA variants (standard LoRA, DoRA, AdaLoRA), we create specialized layer classes that inherit from their respective PEFT variants while adding SGMV optimizations. This ensures compatibility while providing performance improvements:
 
 ```python
 from peft.tuners.lora import LoraLayer
@@ -548,21 +546,71 @@ class VariantFactory:
 
 ### Framework-Agnostic Backend Layer
 
-The core backend layer that handles memory operations and can be inherited by different framework integrations:
+To support multiple frameworks (PEFT, SGLang, vLLM, etc.) while sharing core functionality, we implement a base backend class that provides memory management and SGMV operations. This class serves as the foundation that framework-specific implementations can inherit from:
 
 ```python
 class FDLoraBackendBase:
-    """Base backend for FD-LoRA that handles memory operations and adapter management."""
+    """
+    Framework-agnostic base backend for FD-LoRA operations.
+    
+    This class provides the core functionality that all framework integrations
+    share, including memory management, adapter lifecycle, and SGMV computation.
+    It acts as the central coordinator between different subsystems:
+    
+    - Memory management (loading, offloading, caching)
+    - Backend selection (CUDA, Triton, fallback)
+    - Adapter registry and lifecycle management
+    - Performance monitoring and optimization
+    
+    Framework-specific layers inherit from this class to get all the core
+    functionality while implementing their own framework-specific interfaces.
+    """
     
     def __init__(self, memory_config: MemoryConfig = None, backend_config: BackendConfig = None):
+        """
+        Initialize the base backend with memory and compute configurations.
+        
+        Args:
+            memory_config: Configuration for memory management (cache sizes, strategies, etc.)
+            backend_config: Configuration for compute backends (CUDA, Triton preferences)
+        """
+        # Initialize memory management system with intelligent caching
         self.memory_manager = IntelligentMemoryManager(memory_config or MemoryConfig())
+        
+        # Initialize backend selection and management
         self.backend_manager = BackendManager(backend_config or BackendConfig())
-        self.active_adapters = {}
-        self.adapter_registry = {}
+        
+        # Track currently active adapters for quick access
+        self.active_adapters = {}  # adapter_id -> LoadedAdapter
+        
+        # Registry of all known adapters (active + cached + offloaded)
+        self.adapter_registry = {}  # adapter_id -> AdapterMetadata
         
     async def load_adapter(self, adapter_id: str, adapter_config: LoRAAdapterConfig, 
                           weights: Dict[str, torch.Tensor]) -> LoadedAdapter:
-        """Load adapter with memory management."""
+        """
+        Load a LoRA adapter with intelligent memory management.
+        
+        This method creates a LoadedAdapter instance and registers it with
+        the memory management system. The memory manager handles placement
+        (GPU vs CPU) based on available memory and cache strategies.
+        
+        Args:
+            adapter_id: Unique identifier for the adapter
+            adapter_config: Configuration specifying LoRA variant, rank, etc.
+            weights: Dictionary of tensor weights (lora_A, lora_B, etc.)
+            
+        Returns:
+            LoadedAdapter instance ready for inference
+            
+        Note:
+            This method is async because it may trigger memory operations
+            like offloading other adapters to make space.
+        """
+        # Calculate memory footprint
+        memory_usage = sum(tensor.numel() * tensor.element_size() for tensor in weights.values())
+        
+        # Create adapter instance with metadata
         adapter = LoadedAdapter(
             name=adapter_id,
             config=adapter_config,
@@ -571,44 +619,102 @@ class FDLoraBackendBase:
             device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
             dtype=next(iter(weights.values())).dtype,
             last_accessed=datetime.now(),
-            memory_usage=sum(tensor.numel() * tensor.element_size() for tensor in weights.values())
+            memory_usage=memory_usage
         )
         
-        # Register with memory manager
+        # Register with intelligent memory manager (may trigger async operations)
         loaded_adapter = await self.memory_manager.get_adapter(adapter_id)
+        
+        # Track as active adapter
         self.active_adapters[adapter_id] = loaded_adapter
+        
         return loaded_adapter
     
     async def apply_adapter(self, base_tensor: torch.Tensor, adapter_id: str, 
                            module_name: str) -> torch.Tensor:
-        """Apply adapter to base tensor with memory management."""
-        # Get adapter (may trigger loading/offloading)
+        """
+        Apply LoRA adapter to base tensor using optimized SGMV kernels.
+        
+        This method handles the complete adapter application pipeline:
+        1. Retrieve adapter (may trigger loading from CPU/disk)
+        2. Extract module-specific weights
+        3. Apply SGMV computation using best available backend
+        
+        Args:
+            base_tensor: Input tensor from the base model layer
+            adapter_id: ID of the adapter to apply
+            module_name: Name of the specific module (e.g., "q_proj", "v_proj")
+            
+        Returns:
+            Tensor with LoRA adaptation applied
+            
+        Note:
+            This method is async because adapter retrieval may trigger
+            memory management operations (CPU->GPU transfers, etc.)
+        """
+        # Get adapter from memory manager (handles caching/loading automatically)
         adapter = await self.memory_manager.get_adapter(adapter_id)
         
-        # Get module-specific weights
+        # Extract module-specific LoRA weights
+        # Weight naming convention: "{module_name}.lora_A", "{module_name}.lora_B"
         lora_a = adapter.weights[f"{module_name}.lora_A"]
         lora_b = adapter.weights[f"{module_name}.lora_B"]
         
-        # Apply using backend
+        # Apply LoRA using the best available backend (CUDA, Triton, or fallback)
         backend = self.backend_manager.get_backend()
         return backend.apply_lora(base_tensor, lora_a, lora_b, adapter.config.variant_type)
     
     def track_batch_usage(self, batch_size: int, sequence_length: int, 
                          hidden_size: int, num_layers: int) -> None:
-        """Track batch memory usage for accurate monitoring."""
+        """
+        Track batch memory usage for accurate memory monitoring.
+        
+        This information is used by the memory monitor to:
+        - Predict activation memory requirements
+        - Adjust cache sizes based on actual usage
+        - Optimize memory allocation strategies
+        
+        Args:
+            batch_size: Number of sequences in the batch
+            sequence_length: Length of each sequence
+            hidden_size: Model hidden dimension
+            num_layers: Number of transformer layers
+        """
         self.memory_manager.memory_monitor.track_batch_memory_usage(
             batch_size, sequence_length, hidden_size, num_layers
         )
     
     def register_model(self, model_name: str, model) -> None:
-        """Register base model for memory tracking."""
+        """
+        Register base model for accurate memory tracking.
+        
+        This allows the memory monitor to account for base model memory
+        when calculating available space for adapters.
+        
+        Args:
+            model_name: Identifier for the model
+            model: PyTorch model instance
+        """
         self.memory_manager.memory_monitor.register_model_memory(model_name, model)
     
     def _get_variant_handler(self, variant_type: LoRAVariant) -> VariantHandler:
-        """Get appropriate variant handler."""
-        # Implementation would return the correct handler
+        """
+        Get appropriate variant handler for the specified LoRA type.
+        
+        Args:
+            variant_type: Type of LoRA variant (STANDARD, DORA, etc.)
+            
+        Returns:
+            Handler instance for the variant type
+        """
+        # Implementation would return the correct handler based on variant type
+        # This is a placeholder for the actual variant handler registry
         pass
+```
 
+The FrameworkAdapterMixin provides common functionality that can be mixed into any framework-specific layer or model class. This mixin pattern allows us to add FD-LoRA capabilities to existing framework classes without requiring deep inheritance hierarchies:
+
+```python
 class FrameworkAdapterMixin:
     """Mixin that provides framework-specific adapter integration."""
     
@@ -638,7 +744,7 @@ class FrameworkAdapterMixin:
 
 ### PEFT Integration Layer
 
-PEFT-specific implementation using the base backend:
+For PEFT integration, we inherit from both the PEFT classes and our framework mixin to create enhanced LoRA layers and models. This approach maintains full compatibility with existing PEFT code while adding FD-LoRA optimizations:
 
 ```python
 from peft import LoraLayer, LoraModel
@@ -845,21 +951,21 @@ class AdapterMetadata(BaseModel):
 
 ```python
 class BackendConfig(BaseModel):
-    preferred_backend: str = Field(default="cuda", regex="^(cuda|triton|cutlass|pytorch)$", 
+    preferred_backend: str = Field(default="cuda", regex="^(cuda|triton|pytorch)$", 
                                   description="Preferred backend for SGMV operations")
-    fallback_backends: List[str] = Field(default=["triton", "cutlass", "pytorch"], 
+    fallback_backends: List[str] = Field(default=["triton", "pytorch"], 
                                        description="Fallback backends in order of preference")
     memory_pool_size: int = Field(default=1024 * 1024 * 1024, gt=0, 
                                 description="Memory pool size in bytes (1GB)")
     enable_kernel_fusion: bool = Field(default=True, description="Enable kernel fusion optimizations")
     max_batch_size: int = Field(default=32, gt=0, description="Maximum batch size for operations")
-    enable_cutlass: bool = Field(default=False, description="Enable Cutlass backend (future)")
+
     always_fallback_available: bool = Field(default=True, 
                                            description="Ensure PyTorch fallback is available")
     
     @validator('fallback_backends')
     def validate_fallback_backends(cls, v):
-        valid_backends = {"cuda", "triton", "cutlass", "pytorch"}
+        valid_backends = {"cuda", "triton", "pytorch"}
         for backend in v:
             if backend not in valid_backends:
                 raise ValueError(f"Invalid backend: {backend}")
@@ -896,10 +1002,23 @@ class MemoryConfig(BaseModel):
     queue_size_limit: int = Field(default=100, gt=0, 
                                 description="Max items in async queues")
     
+    # Cache strategy settings
+    gpu_cache_strategy: str = Field(default="lru", regex="^(lru|fifo|priority)$",
+                                  description="GPU cache eviction strategy")
+    cpu_cache_strategy: str = Field(default="lru", regex="^(lru|fifo|priority)$",
+                                  description="CPU cache eviction strategy")
+    
     @validator('offload_threshold')
     def validate_offload_threshold(cls, v):
         if not 0.0 < v <= 1.0:
             raise ValueError("offload_threshold must be between 0.0 and 1.0")
+        return v
+    
+    @validator('gpu_cache_strategy', 'cpu_cache_strategy')
+    def validate_cache_strategies(cls, v):
+        valid_strategies = {"lru", "fifo", "priority"}
+        if v not in valid_strategies:
+            raise ValueError(f"Invalid cache strategy: {v}")
         return v
     
     class Config:
@@ -908,9 +1027,74 @@ class MemoryConfig(BaseModel):
 
 ## Memory Management Architecture
 
+### Extensible Cache System
+
+The memory management system uses a flexible, strategy-based caching architecture that can handle thousands of LoRA adapters efficiently. The design separates cache behavior from cache interface, allowing different eviction strategies to be used based on workload characteristics.
+
+#### Cache Strategy Architecture
+
+The cache system follows the Strategy pattern with a clear hierarchy:
+
+1. **BaseCacheStrategy**: Abstract base class that defines the contract for all cache implementations
+2. **Concrete Strategies**: Specific implementations (LRU, FIFO, Priority-based)
+3. **CacheFactory**: Factory for creating and managing cache strategies
+4. **Configuration Integration**: Seamless integration with memory configuration
+
+#### Design Principles
+
+**Separation of Concerns**: Cache interface is separated from eviction logic, allowing strategies to be swapped without changing client code.
+
+**Extensibility**: New cache strategies can be added by implementing the `BaseCacheStrategy` interface and registering with the factory.
+
+**Configurability**: Different strategies can be used for GPU and CPU caches based on their different characteristics and constraints.
+
+**Testability**: Each strategy can be unit tested independently, and the factory pattern enables easy mocking.
+
+#### Cache Strategy Implementations
+
+**LRU (Least Recently Used) Strategy**:
+- **Use Case**: Best for workloads with temporal locality where recently accessed adapters are likely to be accessed again
+- **Implementation**: Maintains an access order list, moving accessed items to the end
+- **Memory Overhead**: O(n) for access order tracking
+- **Performance**: O(1) for get/put operations
+- **Best For**: Interactive workloads, development environments
+
+**FIFO (First In, First Out) Strategy**:
+- **Use Case**: Simple eviction when access patterns are unpredictable or when fairness is important
+- **Implementation**: Maintains insertion order, evicts oldest items first
+- **Memory Overhead**: O(n) for insertion order tracking
+- **Performance**: O(1) for all operations
+- **Best For**: Batch processing, predictable workloads
+
+**Priority-Based Strategy**:
+- **Use Case**: Complex workloads where adapters have different importance levels
+- **Implementation**: Uses configurable priority function to score adapters
+- **Memory Overhead**: O(n) for metadata storage
+- **Performance**: O(n log n) for eviction candidate selection
+- **Best For**: Production environments with known adapter importance
+
+#### Cache Metadata and Access Tracking
+
+Each cache strategy maintains rich metadata for decision making:
+
+```python
+metadata = {
+    "added_time": datetime,      # When adapter was first cached
+    "access_count": int,         # Total number of accesses
+    "last_access": datetime,     # Most recent access time
+    "priority_score": float      # Computed priority (for priority strategy)
+}
+```
+
+This metadata enables sophisticated eviction decisions based on:
+- **Recency**: How recently was the adapter accessed
+- **Frequency**: How often is the adapter accessed
+- **Age**: How long has the adapter been in cache
+- **Custom Metrics**: User-defined priority functions
+
 ### Intelligent LoRA Management
 
-The memory management system handles thousands of LoRA adapters through a multi-tier caching strategy:
+The memory management system handles thousands of LoRA adapters through a multi-tier caching strategy with pluggable cache behaviors:
 
 ```mermaid
 graph TB
@@ -938,31 +1122,146 @@ graph TB
 
 ### Memory Management Strategies
 
-1. **LRU-based Eviction**: Least recently used adapters are moved from GPU to CPU
-2. **Predictive Preloading**: Frequently accessed adapters are preloaded to GPU
-3. **Memory Pressure Response**: Automatic cleanup when memory usage exceeds thresholds
-4. **Batch Operations**: Efficient batch loading/offloading to minimize overhead
+The memory management system employs multiple complementary strategies:
+
+1. **Strategy-Based Eviction**: Configurable eviction policies (LRU, FIFO, Priority) based on workload characteristics
+   - **LRU**: Optimal for interactive workloads with temporal locality
+   - **FIFO**: Simple and fair for batch processing scenarios
+   - **Priority**: Advanced scoring for production environments with adapter importance hierarchies
+
+2. **Predictive Preloading**: Machine learning-based prediction of adapter access patterns
+   - Analyzes historical access patterns to predict future needs
+   - Preloads high-probability adapters during idle periods
+   - Reduces cache misses and improves response times
+
+3. **Memory Pressure Response**: Multi-level response to memory constraints
+   - **Soft Pressure** (70-80% usage): Begin background offloading of low-priority adapters
+   - **Hard Pressure** (80-90% usage): Aggressive eviction using cache strategy
+   - **Critical Pressure** (>90% usage): Emergency cleanup and fallback to CPU-only mode
+
+4. **Batch Operations**: Optimized bulk operations to minimize overhead
+   - **Batch Offloading**: Group multiple adapters in single GPU→CPU transfer
+   - **Batch Onloading**: Efficient CPU→GPU transfers with memory pre-allocation
+   - **Parallel Processing**: Concurrent offload/onload operations using async workers
+
+5. **Adaptive Strategy Selection**: Dynamic strategy switching based on workload patterns
+   - Monitor cache hit rates and access patterns
+   - Automatically switch between strategies for optimal performance
+   - Provide recommendations for manual strategy tuning
+
+### Cache Strategy Selection Guidelines
+
+Choosing the right cache strategy depends on workload characteristics:
+
+#### LRU Strategy - Best For:
+- **Interactive Applications**: Web services, chatbots, interactive demos
+- **Development Environments**: Frequent switching between small sets of adapters
+- **Temporal Locality**: Workloads where recent adapters are likely to be reused
+- **Small to Medium Scale**: Up to ~100 adapters with clear access patterns
+
+#### FIFO Strategy - Best For:
+- **Batch Processing**: Sequential processing of adapter sets
+- **Fair Resource Allocation**: When all adapters have equal importance
+- **Predictable Workloads**: Known adapter usage sequences
+- **Memory-Constrained Environments**: Minimal metadata overhead
+
+#### Priority Strategy - Best For:
+- **Production Environments**: Complex multi-tenant systems
+- **Heterogeneous Workloads**: Adapters with different importance levels
+- **SLA-Driven Systems**: Where some adapters must have guaranteed availability
+- **Large Scale Deployments**: Hundreds to thousands of adapters
+
+#### Custom Strategy Development:
+For specialized use cases, custom strategies can be implemented:
+
+```python
+class AdapterSizeStrategy(BaseCacheStrategy):
+    """Evict largest adapters first to maximize cache utilization."""
+    
+    def get_eviction_candidates(self, count: int = 1) -> List[str]:
+        # Sort by memory usage, largest first
+        sizes = [(key, self.cache[key].memory_usage) 
+                for key in self.cache.keys()]
+        sizes.sort(key=lambda x: x[1], reverse=True)
+        return [key for key, _ in sizes[:count]]
+```
 
 ### CPU Offloading Implementation
 
+The CPU offloading system works in conjunction with the cache strategies to provide seamless adapter movement:
+
+For accurate memory management, we need precise tracking of GPU memory usage that accounts for model weights, activations, and adapter storage. The AccurateMemoryMonitor provides this functionality by using PyTorch's CUDA memory APIs:
+
 ```python
 class AccurateMemoryMonitor:
+    """
+    Accurate GPU memory monitoring system that tracks real memory usage.
+    
+    This class provides precise memory tracking by using PyTorch's CUDA
+    memory management APIs and accounting for all memory consumers:
+    - Base model weights
+    - LoRA adapter weights  
+    - Activation memory from different batch sizes
+    - Memory fragmentation and overhead
+    
+    The monitor maintains baseline measurements and tracks changes over time
+    to provide accurate available memory calculations for adapter management.
+    """
+    
     def __init__(self):
+        """
+        Initialize the memory monitor with baseline measurements.
+        
+        Takes a snapshot of current memory state to establish baseline
+        usage before any adapters are loaded. This baseline is used to
+        calculate available memory for adapter storage.
+        """
+        # Capture baseline memory state before any adapters
         self.baseline_memory = self._get_baseline_memory()
-        self.model_memory_usage = {}
+        
+        # Track memory usage by registered models
+        self.model_memory_usage = {}  # model_name -> memory_bytes
+        
+        # Track activation memory patterns for different batch configurations
         self.activation_memory_tracker = ActivationMemoryTracker()
-        self.adapter_memory_tracker = {}
+        
+        # Track individual adapter memory usage
+        self.adapter_memory_tracker = {}  # adapter_id -> memory_bytes
         
     def _get_baseline_memory(self) -> Dict[str, int]:
-        """Get baseline GPU memory usage before any adapters."""
+        """
+        Capture baseline GPU memory usage before loading adapters.
+        
+        This method forces a memory cleanup and then captures the current
+        memory state. This baseline is used to calculate how much memory
+        is available for adapter storage.
+        
+        Returns:
+            Dictionary with memory statistics:
+            - allocated: Currently allocated memory by PyTorch
+            - reserved: Memory reserved by PyTorch (includes allocated + cache)
+            - free: Available memory for new allocations
+            
+        Note:
+            On systems without CUDA, returns zeros for all values.
+        """
         if torch.cuda.is_available():
+            # Force cleanup to get accurate baseline
             torch.cuda.empty_cache()
+            
+            total_memory = torch.cuda.get_device_properties(0).total_memory
+            allocated = torch.cuda.memory_allocated()
+            reserved = torch.cuda.memory_reserved()
+            
             return {
-                "allocated": torch.cuda.memory_allocated(),
-                "reserved": torch.cuda.memory_reserved(),
-                "free": torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_reserved()
+                "allocated": allocated,
+                "reserved": reserved, 
+                "free": total_memory - reserved,
+                "total": total_memory
             }
-        return {"allocated": 0, "reserved": 0, "free": 0}
+        
+        # Return zeros for CPU-only systems
+        return {"allocated": 0, "reserved": 0, "free": 0, "total": 0}
     
     def register_model_memory(self, model_name: str, model) -> None:
         """Register base model memory usage."""
@@ -1128,12 +1427,562 @@ class ActivationMemoryTracker:
                 for batch in self.batch_history
             ])
             return int(avg_memory_per_token * batch_size * sequence_length)
+```
 
+The ActivationMemoryTracker works alongside the memory monitor to track how different batch configurations affect memory usage. This enables accurate prediction of memory requirements for future inference requests:
+
+```python
+class ActivationMemoryTracker:
+    def __init__(self):
+        self.batch_history = []
+        self.max_history_size = 100
+        
+    def record_batch_config(self, batch_size: int, sequence_length: int, 
+                           hidden_size: int, num_layers: int) -> None:
+        # Implementation tracks memory usage patterns
+        pass
+    
+    def get_estimated_peak_usage(self) -> int:
+        # Returns 95th percentile of recent usage as peak estimate
+        pass
+```
+
+The cache system is built around a base strategy class that defines the interface all cache implementations must follow. This abstract base class provides common functionality while allowing subclasses to implement their own eviction logic:
+
+```python
+class BaseCacheStrategy(ABC):
+    """
+    Abstract base class for cache eviction strategies.
+    
+    This class defines the contract that all cache implementations must follow.
+    It provides common functionality while allowing subclasses to implement
+    their own eviction logic through abstract methods.
+    
+    The design separates cache storage (self.cache) from access metadata 
+    (self.metadata) to enable sophisticated eviction decisions while
+    maintaining clean interfaces.
+    """
+    
+    def __init__(self, cache_type: str, max_capacity: int):
+        """
+        Initialize the cache strategy.
+        
+        Args:
+            cache_type: Identifier for the cache type ("gpu", "cpu", etc.)
+            max_capacity: Maximum number of items the cache can hold
+        """
+        self.cache_type = cache_type
+        self.max_capacity = max_capacity
+        self.cache = {}  # Main storage: key -> value
+        self.metadata = {}  # Access tracking: key -> metadata dict
+    
+    @abstractmethod
+    def get(self, key: str) -> Optional[Any]:
+        """
+        Retrieve item from cache and update access patterns.
+        
+        This method must be implemented by subclasses to define how
+        access patterns are tracked for their specific eviction strategy.
+        
+        Args:
+            key: The cache key to retrieve
+            
+        Returns:
+            The cached value if found, None otherwise
+        """
+        pass
+    
+    @abstractmethod
+    def put(self, key: str, value: Any) -> None:
+        """
+        Store item in cache, evicting items if necessary.
+        
+        Subclasses implement their specific eviction logic here.
+        This method handles both new insertions and updates to existing keys.
+        
+        Args:
+            key: The cache key
+            value: The value to store
+        """
+        pass
+    
+    @abstractmethod
+    def remove(self, key: str) -> bool:
+        """
+        Remove item from cache and clean up associated metadata.
+        
+        Args:
+            key: The cache key to remove
+            
+        Returns:
+            True if item was removed, False if key didn't exist
+        """
+        pass
+    
+    @abstractmethod
+    def get_eviction_candidates(self, count: int = 1) -> List[str]:
+        """
+        Get candidates for eviction based on the strategy's logic.
+        
+        This is the core method that differentiates cache strategies.
+        Each strategy implements its own logic for selecting which
+        items should be evicted when space is needed.
+        
+        Args:
+            count: Number of candidates to return
+            
+        Returns:
+            List of cache keys that are candidates for eviction,
+            ordered by eviction priority (first = highest priority to evict)
+        """
+        pass
+    
+    @abstractmethod
+    def update_access_pattern(self, key: str) -> None:
+        """
+        Update access pattern tracking for the given key.
+        
+        This method is called whenever an item is accessed and allows
+        strategies to maintain their specific access tracking data.
+        
+        Args:
+            key: The cache key that was accessed
+        """
+        pass
+    
+    def __contains__(self, key: str) -> bool:
+        """Check if key exists in cache using Python 'in' operator."""
+        return key in self.cache
+    
+    def __len__(self) -> int:
+        """Get current cache size using Python len() function."""
+        return len(self.cache)
+    
+    def is_full(self) -> bool:
+        """
+        Check if cache has reached its maximum capacity.
+        
+        Returns:
+            True if cache is at max capacity, False otherwise
+        """
+        return len(self.cache) >= self.max_capacity
+    
+    def keys(self) -> List[str]:
+        """
+        Get all cache keys as a list.
+        
+        Returns:
+            List of all current cache keys
+        """
+        return list(self.cache.keys())
+```
+
+The LRU (Least Recently Used) strategy is one of the most commonly used cache eviction policies. It maintains an ordered list of cache keys based on access time, evicting the least recently used items when space is needed:
+
+```python
+class LRUCacheStrategy(BaseCacheStrategy):
+    """
+    LRU (Least Recently Used) cache implementation.
+    
+    This strategy maintains an ordered list of cache keys based on access time.
+    When eviction is needed, it removes the least recently used items first.
+    
+    Data Structures:
+    - self.cache: Main storage (inherited from base class)
+    - self.access_order: List maintaining access order (oldest first, newest last)
+    - self.metadata: Access statistics for monitoring and debugging
+    
+    Time Complexity:
+    - get(): O(1) average case (dict lookup + list operations)
+    - put(): O(1) average case 
+    - remove(): O(n) worst case (list.remove() operation)
+    - get_eviction_candidates(): O(1)
+    """
+    
+    def __init__(self, cache_type: str, max_capacity: int):
+        """
+        Initialize LRU cache strategy.
+        
+        Args:
+            cache_type: Type identifier for this cache instance
+            max_capacity: Maximum number of items to store
+        """
+        super().__init__(cache_type, max_capacity)
+        # Track access order: index 0 = least recent, index -1 = most recent
+        self.access_order = []
+    
+    def get(self, key: str) -> Optional[Any]:
+        """
+        Retrieve item and mark as most recently used.
+        
+        The LRU strategy requires updating access order on every get operation
+        to maintain accurate eviction ordering.
+        
+        Args:
+            key: Cache key to retrieve
+            
+        Returns:
+            Cached value if found, None if not in cache
+        """
+        if key in self.cache:
+            # Mark as recently accessed (moves to end of access_order)
+            self.update_access_pattern(key)
+            return self.cache[key]
+        return None
+    
+    def put(self, key: str, value: Any) -> None:
+        """
+        Store item in cache, evicting LRU item if at capacity.
+        
+        For existing keys, updates the value and marks as recently used.
+        For new keys, adds to cache and evicts LRU item if necessary.
+        
+        Args:
+            key: Cache key
+            value: Value to store (typically a LoadedAdapter or OffloadedAdapter)
+        """
+        if key in self.cache:
+            # Update existing item - change value and mark as recent
+            self.cache[key] = value
+            self.update_access_pattern(key)
+        else:
+            # Add new item
+            if self.is_full():
+                # Cache is full - evict least recently used item
+                lru_key = self.access_order[0]  # First item is least recent
+                self.remove(lru_key)
+            
+            # Add new item to cache and access tracking
+            self.cache[key] = value
+            self.access_order.append(key)  # New items go to end (most recent)
+            
+            # Initialize metadata for monitoring and debugging
+            self.metadata[key] = {
+                "added_time": datetime.now(),
+                "access_count": 1,
+                "last_access": datetime.now()
+            }
+    
+    def remove(self, key: str) -> bool:
+        """
+        Remove item from cache and clean up all tracking data.
+        
+        This method ensures complete cleanup of the item from all
+        data structures to prevent memory leaks.
+        
+        Args:
+            key: Cache key to remove
+            
+        Returns:
+            True if item was removed, False if key didn't exist
+        """
+        if key in self.cache:
+            # Remove from all data structures
+            del self.cache[key]
+            self.access_order.remove(key)  # O(n) operation
+            del self.metadata[key]
+            return True
+        return False
+    
+    def get_eviction_candidates(self, count: int = 1) -> List[str]:
+        """
+        Get least recently used items for eviction.
+        
+        Returns items from the beginning of access_order list,
+        which contains the least recently used items.
+        
+        Args:
+            count: Number of candidates to return
+            
+        Returns:
+            List of keys ordered by eviction priority (LRU first)
+        """
+        return self.access_order[:count]
+    
+    def update_access_pattern(self, key: str) -> None:
+        """
+        Mark key as most recently used by moving to end of access order.
+        
+        This is the core LRU operation - moving accessed items to the
+        end of the list maintains the LRU ordering invariant.
+        
+        Args:
+            key: Cache key that was accessed
+        """
+        if key in self.access_order:
+            # Move to end of list (most recent position)
+            self.access_order.remove(key)  # Remove from current position
+            self.access_order.append(key)  # Add to end (most recent)
+            
+            # Update metadata for monitoring
+            self.metadata[key]["last_access"] = datetime.now()
+            self.metadata[key]["access_count"] += 1
+```
+
+The FIFO (First In, First Out) strategy provides a simpler eviction policy that doesn't consider access patterns. It evicts items in the order they were added, making it suitable for scenarios where access patterns are unpredictable:
+
+```python
+class FIFOCacheStrategy(BaseCacheStrategy):
+    """FIFO (First In, First Out) cache implementation."""
+    
+    def __init__(self, cache_type: str, max_capacity: int):
+        super().__init__(cache_type, max_capacity)
+        self.insertion_order = []
+    
+    def get(self, key: str) -> Optional[Any]:
+        """Get item without affecting eviction order."""
+        if key in self.cache:
+            self.update_access_pattern(key)
+            return self.cache[key]
+        return None
+    
+    def put(self, key: str, value: Any) -> None:
+        """Put item, evicting oldest items if necessary."""
+        if key in self.cache:
+            # Update existing item
+            self.cache[key] = value
+            self.update_access_pattern(key)
+        else:
+            # Add new item
+            if self.is_full():
+                # Evict oldest item
+                oldest_key = self.insertion_order[0]
+                self.remove(oldest_key)
+            
+            self.cache[key] = value
+            self.insertion_order.append(key)
+            self.metadata[key] = {
+                "added_time": datetime.now(),
+                "access_count": 1,
+                "last_access": datetime.now()
+            }
+    
+    def remove(self, key: str) -> bool:
+        """Remove item from cache."""
+        if key in self.cache:
+            del self.cache[key]
+            self.insertion_order.remove(key)
+            del self.metadata[key]
+            return True
+        return False
+    
+    def get_eviction_candidates(self, count: int = 1) -> List[str]:
+        """Get FIFO candidates for eviction."""
+        return self.insertion_order[:count]
+    
+    def update_access_pattern(self, key: str) -> None:
+        """Update access metadata without changing eviction order."""
+        if key in self.metadata:
+            self.metadata[key]["last_access"] = datetime.now()
+            self.metadata[key]["access_count"] += 1
+```
+
+The Priority-based strategy allows for sophisticated eviction decisions using custom scoring functions. This is particularly useful in production environments where different adapters have varying importance levels:
+
+```python
+class PriorityCacheStrategy(BaseCacheStrategy):
+    """Priority-based cache with custom scoring function."""
+    
+    def __init__(self, cache_type: str, max_capacity: int, priority_func=None):
+        super().__init__(cache_type, max_capacity)
+        self.priority_func = priority_func or self._default_priority_func
+    
+    def get(self, key: str) -> Optional[Any]:
+        """Get item and update access patterns."""
+        if key in self.cache:
+            self.update_access_pattern(key)
+            return self.cache[key]
+        return None
+    
+    def put(self, key: str, value: Any) -> None:
+        """Put item, evicting lowest priority items if necessary."""
+        if key in self.cache:
+            # Update existing item
+            self.cache[key] = value
+            self.update_access_pattern(key)
+        else:
+            # Add new item
+            if self.is_full():
+                # Evict lowest priority item
+                candidates = self.get_eviction_candidates(1)
+                if candidates:
+                    self.remove(candidates[0])
+            
+            self.cache[key] = value
+            self.metadata[key] = {
+                "added_time": datetime.now(),
+                "access_count": 1,
+                "last_access": datetime.now(),
+                "priority_score": 1.0
+            }
+    
+    def remove(self, key: str) -> bool:
+        """Remove item from cache."""
+        if key in self.cache:
+            del self.cache[key]
+            del self.metadata[key]
+            return True
+        return False
+    
+    def get_eviction_candidates(self, count: int = 1) -> List[str]:
+        """Get lowest priority candidates for eviction."""
+        # Calculate current priorities and sort
+        priorities = []
+        for key in self.cache.keys():
+            priority = self.priority_func(key, self.metadata[key])
+            priorities.append((priority, key))
+        
+        # Sort by priority (lowest first)
+        priorities.sort(key=lambda x: x[0])
+        return [key for _, key in priorities[:count]]
+    
+    def update_access_pattern(self, key: str) -> None:
+        """Update access pattern and recalculate priority."""
+        if key in self.metadata:
+            self.metadata[key]["last_access"] = datetime.now()
+            self.metadata[key]["access_count"] += 1
+            self.metadata[key]["priority_score"] = self.priority_func(key, self.metadata[key])
+    
+    def _default_priority_func(self, key: str, metadata: Dict) -> float:
+        """Default priority function based on recency and frequency."""
+        now = datetime.now()
+        recency = (now - metadata["last_access"]).total_seconds()
+        frequency = metadata["access_count"]
+        
+        # Lower score = higher priority for eviction
+        return recency / (frequency + 1)
+```
+
+To manage the different cache strategies and provide a clean interface for creating cache instances, we use a factory pattern. The CacheFactory handles strategy registration and provides type-safe cache creation:
+
+```python
+class CacheFactory:
+    """
+    Factory class for creating and managing cache strategy instances.
+    
+    This factory implements the Factory pattern to provide a centralized
+    way to create cache instances while supporting extensibility through
+    strategy registration.
+    
+    Features:
+    - Strategy registration for custom cache implementations
+    - Type-safe cache creation with validation
+    - Centralized strategy management
+    - Support for strategy-specific parameters via **kwargs
+    
+    The factory maintains a registry of available strategies and provides
+    methods to create instances, register new strategies, and query
+    available options.
+    """
+    
+    # Class-level registry of available cache strategies
+    # Maps strategy name -> strategy class
+    _strategies = {
+        "lru": LRUCacheStrategy,
+        "fifo": FIFOCacheStrategy,
+        "priority": PriorityCacheStrategy,
+    }
+    
+    @classmethod
+    def create_cache(cls, strategy: str, cache_type: str, max_capacity: int, **kwargs) -> BaseCacheStrategy:
+        """
+        Create a cache instance with the specified strategy.
+        
+        This method validates the strategy name, instantiates the appropriate
+        cache class, and passes any additional parameters to the constructor.
+        
+        Args:
+            strategy: Name of the cache strategy ("lru", "fifo", "priority", etc.)
+            cache_type: Type identifier for the cache ("gpu", "cpu", etc.)
+            max_capacity: Maximum number of items the cache can hold
+            **kwargs: Additional parameters passed to the strategy constructor
+                     (e.g., priority_func for PriorityCacheStrategy)
+        
+        Returns:
+            Configured cache instance implementing BaseCacheStrategy
+            
+        Raises:
+            ValueError: If strategy name is not registered
+            
+        Example:
+            # Create LRU cache
+            cache = CacheFactory.create_cache("lru", "gpu", 100)
+            
+            # Create priority cache with custom function
+            cache = CacheFactory.create_cache("priority", "cpu", 200, 
+                                            priority_func=my_priority_func)
+        """
+        if strategy not in cls._strategies:
+            available = ", ".join(cls._strategies.keys())
+            raise ValueError(f"Unknown cache strategy: {strategy}. "
+                           f"Available strategies: {available}")
+        
+        strategy_class = cls._strategies[strategy]
+        return strategy_class(cache_type, max_capacity, **kwargs)
+    
+    @classmethod
+    def register_strategy(cls, name: str, strategy_class: type) -> None:
+        """
+        Register a new cache strategy for use with the factory.
+        
+        This method allows extending the cache system with custom strategies
+        without modifying the core factory code. The strategy class must
+        inherit from BaseCacheStrategy.
+        
+        Args:
+            name: Unique name for the strategy (used in create_cache calls)
+            strategy_class: Class implementing BaseCacheStrategy interface
+            
+        Raises:
+            TypeError: If strategy_class doesn't inherit from BaseCacheStrategy
+            
+        Example:
+            class MyCustomStrategy(BaseCacheStrategy):
+                # Implementation here
+                pass
+            
+            CacheFactory.register_strategy("custom", MyCustomStrategy)
+            cache = CacheFactory.create_cache("custom", "gpu", 50)
+        """
+        # Validate that the class inherits from BaseCacheStrategy
+        if not issubclass(strategy_class, BaseCacheStrategy):
+            raise TypeError(f"Strategy class must inherit from BaseCacheStrategy")
+        
+        cls._strategies[name] = strategy_class
+    
+    @classmethod
+    def get_available_strategies(cls) -> List[str]:
+        """
+        Get list of all registered cache strategy names.
+        
+        Returns:
+            List of strategy names that can be used with create_cache()
+            
+        Example:
+            strategies = CacheFactory.get_available_strategies()
+            print(f"Available strategies: {strategies}")
+            # Output: Available strategies: ['lru', 'fifo', 'priority']
+        """
+        return list(cls._strategies.keys())
+```
+
+The IntelligentMemoryManager coordinates all memory operations and integrates the cache strategies with the broader memory management system. It uses the cache factory to create appropriate cache instances and manages the async operations for adapter loading and offloading:
+
+```python
 class IntelligentMemoryManager:
     def __init__(self, config: MemoryConfig):
         self.config = config
-        self.gpu_cache = AdapterCache("gpu", config.max_adapters_in_gpu)
-        self.cpu_cache = AdapterCache("cpu", config.max_adapters_in_cpu)
+        
+        # Create caches using factory with configurable strategies
+        gpu_strategy = getattr(config, 'gpu_cache_strategy', 'lru')
+        cpu_strategy = getattr(config, 'cpu_cache_strategy', 'lru')
+        
+        self.gpu_cache = CacheFactory.create_cache(
+            gpu_strategy, "gpu", config.max_adapters_in_gpu
+        )
+        self.cpu_cache = CacheFactory.create_cache(
+            cpu_strategy, "cpu", config.max_adapters_in_cpu
+        )
         self.access_tracker = AccessTracker()
         self.memory_monitor = AccurateMemoryMonitor()
         
@@ -1180,8 +2029,12 @@ class IntelligentMemoryManager:
         return gpu_adapter
     
     async def _make_gpu_space_async(self, required_bytes: int) -> None:
-        """Asynchronously free GPU memory by offloading least used adapters."""
-        candidates = self.gpu_cache.get_lru_candidates()
+        """Asynchronously free GPU memory by offloading adapters based on cache strategy."""
+        # Estimate how many adapters to evict
+        avg_adapter_size = self._estimate_average_adapter_size()
+        estimated_adapters_to_evict = max(1, int(required_bytes / avg_adapter_size))
+        
+        candidates = self.gpu_cache.get_eviction_candidates(estimated_adapters_to_evict)
         offload_tasks = []
         freed_bytes = 0
         
@@ -1190,14 +2043,30 @@ class IntelligentMemoryManager:
                 break
             
             adapter = self.gpu_cache.get(adapter_id)
-            # Schedule async offload
-            task = self._schedule_offload_async(adapter_id, adapter)
-            offload_tasks.append(task)
-            freed_bytes += adapter.memory_usage
+            if adapter:
+                # Schedule async offload
+                task = self._schedule_offload_async(adapter_id, adapter)
+                offload_tasks.append(task)
+                freed_bytes += adapter.memory_usage
         
         # Wait for offloads to complete
         if offload_tasks:
             await asyncio.gather(*offload_tasks)
+    
+    def _estimate_average_adapter_size(self) -> int:
+        """Estimate average adapter size for eviction planning."""
+        if len(self.gpu_cache) == 0:
+            return 1024 * 1024  # 1MB default
+        
+        total_size = 0
+        count = 0
+        for adapter_id in self.gpu_cache.keys():
+            adapter = self.gpu_cache.get(adapter_id)
+            if adapter:
+                total_size += adapter.memory_usage
+                count += 1
+        
+        return total_size // count if count > 0 else 1024 * 1024
     
     async def _schedule_offload_async(self, adapter_id: str, adapter: LoadedAdapter) -> None:
         """Schedule asynchronous offload operation."""
@@ -1573,6 +2442,100 @@ class FallbackTest:
             result = backend.apply_lora(base_weight, lora_a, lora_b, LoRAVariant.STANDARD)
             expected = base_weight + (lora_b @ lora_a)
             torch.testing.assert_close(result, expected)
+
+class CacheStrategyTest:
+    def test_lru_cache_behavior(self):
+        """Test LRU cache eviction behavior."""
+        cache = CacheFactory.create_cache("lru", "test", max_capacity=3)
+        
+        # Fill cache
+        cache.put("a", "value_a")
+        cache.put("b", "value_b")
+        cache.put("c", "value_c")
+        
+        # Access 'a' to make it recently used
+        cache.get("a")
+        
+        # Add new item, should evict 'b' (least recently used)
+        cache.put("d", "value_d")
+        
+        assert "a" in cache
+        assert "b" not in cache  # Evicted
+        assert "c" in cache
+        assert "d" in cache
+    
+    def test_fifo_cache_behavior(self):
+        """Test FIFO cache eviction behavior."""
+        cache = CacheFactory.create_cache("fifo", "test", max_capacity=3)
+        
+        # Fill cache
+        cache.put("a", "value_a")
+        cache.put("b", "value_b")
+        cache.put("c", "value_c")
+        
+        # Access 'a' (shouldn't affect FIFO order)
+        cache.get("a")
+        
+        # Add new item, should evict 'a' (first in)
+        cache.put("d", "value_d")
+        
+        assert "a" not in cache  # Evicted (first in)
+        assert "b" in cache
+        assert "c" in cache
+        assert "d" in cache
+    
+    def test_priority_cache_behavior(self):
+        """Test priority-based cache eviction."""
+        def custom_priority(key: str, metadata: Dict) -> float:
+            # Higher access count = lower eviction priority
+            return 1.0 / (metadata["access_count"] + 1)
+        
+        cache = CacheFactory.create_cache("priority", "test", max_capacity=3, 
+                                        priority_func=custom_priority)
+        
+        # Fill cache
+        cache.put("a", "value_a")
+        cache.put("b", "value_b")
+        cache.put("c", "value_c")
+        
+        # Access 'a' multiple times to increase its priority
+        for _ in range(5):
+            cache.get("a")
+        
+        # Add new item, should evict item with lowest priority
+        cache.put("d", "value_d")
+        
+        assert "a" in cache  # High priority, shouldn't be evicted
+        # Either 'b' or 'c' should be evicted (both have low priority)
+    
+    def test_cache_factory_registration(self):
+        """Test registering custom cache strategies."""
+        class CustomCacheStrategy(BaseCacheStrategy):
+            def get(self, key: str) -> Optional[Any]:
+                return self.cache.get(key)
+            
+            def put(self, key: str, value: Any) -> None:
+                self.cache[key] = value
+            
+            def remove(self, key: str) -> bool:
+                return self.cache.pop(key, None) is not None
+            
+            def get_eviction_candidates(self, count: int = 1) -> List[str]:
+                return list(self.cache.keys())[:count]
+            
+            def update_access_pattern(self, key: str) -> None:
+                pass
+        
+        # Register custom strategy
+        CacheFactory.register_strategy("custom", CustomCacheStrategy)
+        
+        # Create cache with custom strategy
+        cache = CacheFactory.create_cache("custom", "test", max_capacity=10)
+        assert isinstance(cache, CustomCacheStrategy)
+        
+        # Test it works
+        cache.put("test", "value")
+        assert cache.get("test") == "value"
 ```
 
 ### C++/CUDA Testing
@@ -1602,122 +2565,22 @@ class FrameworkIntegration(ABC):
         """Check if model is compatible with this integration."""
         pass
 
-class SGLangFDLoraLayer(FrameworkAdapterMixin):
-    """SGLang-specific FD-LoRA layer implementation."""
-    
-    def __init__(self, sglang_layer, adapter_config: LoRAAdapterConfig):
-        super().__init__()
-        self.base_layer = sglang_layer
-        self.adapter_config = adapter_config
-        self.module_name = getattr(sglang_layer, 'name', 'sglang_layer')
-        
-    def forward(self, x, *args, **kwargs):
-        """SGLang-specific forward pass with FD-LoRA optimizations."""
-        # Track batch usage
-        self._fd_track_batch(x)
-        
-        # Apply base layer computation
-        base_output = self.base_layer(x, *args, **kwargs)
-        
-        # Apply FD-LoRA adapter if active
-        if hasattr(self, 'active_adapter_id'):
-            adapter_output = asyncio.run(
-                self._fd_apply_adapter(base_output, self.active_adapter_id, self.module_name)
-            )
-            return adapter_output
-        
-        return base_output
 
-class VLLMFDLoraLayer(FrameworkAdapterMixin):
-    """vLLM-specific FD-LoRA layer implementation."""
-    
-    def __init__(self, vllm_layer, adapter_config: LoRAAdapterConfig):
-        super().__init__()
-        self.base_layer = vllm_layer
-        self.adapter_config = adapter_config
-        self.module_name = getattr(vllm_layer, 'name', 'vllm_layer')
-        
-    def forward(self, x, *args, **kwargs):
-        """vLLM-specific forward pass with FD-LoRA optimizations."""
-        # Track batch usage for vLLM's continuous batching
-        self._fd_track_batch(x)
-        
-        # Apply base layer computation (maintains PagedAttention)
-        base_output = self.base_layer(x, *args, **kwargs)
-        
-        # Apply FD-LoRA adapter if active
-        if hasattr(self, 'active_adapter_id'):
-            adapter_output = asyncio.run(
-                self._fd_apply_adapter(base_output, self.active_adapter_id, self.module_name)
-            )
-            return adapter_output
-        
-        return base_output
-
-class SGLangIntegration(FrameworkIntegration):
-    """Integration with SGLang framework using base backend."""
-    
-    def integrate_model(self, sglang_model, fd_lora_config):
-        """Integrate FD-LoRA layers into SGLang model."""
-        # Create SGLang-specific FD-LoRA layers
-        for name, layer in sglang_model.named_modules():
-            if self._is_target_layer(name, fd_lora_config.target_modules):
-                # Replace with SGLang FD-LoRA layer
-                fd_layer = SGLangFDLoraLayer(layer, fd_lora_config)
-                fd_layer._setup_fd_integration("sglang_model", sglang_model)
-                self._replace_layer(sglang_model, name, fd_layer)
-        
-        return sglang_model
-    
-    def is_compatible(self, model) -> bool:
-        """Check SGLang model compatibility."""
-        return hasattr(model, 'sglang_model_type') or 'sglang' in str(type(model)).lower()
-    
-    def _is_target_layer(self, layer_name: str, target_modules: List[str]) -> bool:
-        """Check if layer should be replaced with FD-LoRA."""
-        return any(target in layer_name for target in target_modules)
-    
-    def _replace_layer(self, model, layer_name: str, new_layer):
-        """Replace layer in model with FD-LoRA layer."""
-        # Implementation to replace layer in model hierarchy
-        pass
-
-class VLLMIntegration(FrameworkIntegration):
-    """Integration with vLLM framework using base backend."""
-    
-    def integrate_model(self, vllm_model, fd_lora_config):
-        """Integrate FD-LoRA layers into vLLM model."""
-        # Create vLLM-specific FD-LoRA layers
-        for name, layer in vllm_model.named_modules():
-            if self._is_target_layer(name, fd_lora_config.target_modules):
-                # Replace with vLLM FD-LoRA layer
-                fd_layer = VLLMFDLoraLayer(layer, fd_lora_config)
-                fd_layer._setup_fd_integration("vllm_model", vllm_model)
-                self._replace_layer(vllm_model, name, fd_layer)
-        
-        return vllm_model
-    
-    def is_compatible(self, model) -> bool:
-        """Check vLLM model compatibility."""
-        return hasattr(model, 'vllm_model_type') or 'vllm' in str(type(model)).lower()
-    
-    def _is_target_layer(self, layer_name: str, target_modules: List[str]) -> bool:
-        """Check if layer should be replaced with FD-LoRA."""
-        return any(target in layer_name for target in target_modules)
-    
-    def _replace_layer(self, model, layer_name: str, new_layer):
-        """Replace layer in model hierarchy."""
-        # Implementation to replace layer in model hierarchy
-        pass
 
 class IntegrationManager:
     """Manages framework integrations."""
     
     def __init__(self):
-        self.integrations = {
-            "sglang": SGLangIntegration(),
-            "vllm": VLLMIntegration(),
-        }
+        self.integrations = {}
+        self._load_integrations()
+    
+    def _load_integrations(self):
+        """Load available framework integrations."""
+        try:
+            from fd_lora.peft.integration import PEFTIntegration
+            self.integrations["peft"] = PEFTIntegration()
+        except ImportError:
+            pass
     
     def register_integration(self, name: str, integration: FrameworkIntegration):
         """Register new framework integration."""
@@ -1733,6 +2596,10 @@ class IntegrationManager:
                 raise CompatibilityError(f"Model not compatible with {framework_name}")
         else:
             raise ValueError(f"Unknown framework: {framework_name}")
+    
+    def get_available_frameworks(self) -> List[str]:
+        """Get list of available framework integrations."""
+        return list(self.integrations.keys())
 ```
 
 ### Extensibility Features
@@ -1806,4 +2673,233 @@ target_include_directories(fd_lora_core_impl INTERFACE ../../include)
 
 **Note**: The CMake files are purely for development convenience and IDE support. The actual build process will use setuptools with PyBind11 for Python package creation.
 
+## Framework-Specific Usage Examples
+
+### PEFT Integration
+```python
+from fd_lora.peft import FDLoraModel, FDLoraLayer
+from fd_lora.peft.integration import PEFTIntegration
+
+# Direct PEFT usage
+model = FDLoraModel(base_model, peft_config, adapter_name)
+await model.load_adapter_async("path/to/adapter", "my_adapter")
+
+# Or via integration manager
+integration = PEFTIntegration()
+fd_model = integration.integrate_model(peft_model, fd_lora_config)
+```
+
+### Universal Integration Manager
+```python
+from fd_lora.core import IntegrationManager
+
+# Auto-detect and integrate with supported frameworks
+manager = IntegrationManager()
+available_frameworks = manager.get_available_frameworks()  # ['peft']
+
+# Integrate with detected framework
+fd_model = manager.integrate_with_framework("peft", model, config)
+```
+
+### Cache Strategy Configuration
+
+The cache system provides flexible configuration options for different deployment scenarios:
+
+#### Basic Configuration
+```python
+from fd_lora.core import MemoryConfig, CacheFactory
+
+# Development environment - simple LRU caching
+dev_config = MemoryConfig(
+    gpu_cache_strategy="lru",
+    cpu_cache_strategy="lru",
+    max_adapters_in_gpu=20,
+    max_adapters_in_cpu=100
+)
+
+# Production environment - sophisticated priority-based caching
+prod_config = MemoryConfig(
+    gpu_cache_strategy="priority",
+    cpu_cache_strategy="lru", 
+    max_adapters_in_gpu=100,
+    max_adapters_in_cpu=1000,
+    offload_threshold=0.85  # More aggressive offloading
+)
+```
+
+#### Advanced Priority Configuration
+```python
+def production_priority_func(key: str, metadata: Dict) -> float:
+    """
+    Production priority function considering multiple factors:
+    - Access frequency (higher = better)
+    - Recency (more recent = better) 
+    - Adapter size (smaller = better for cache efficiency)
+    - Business priority (if available in metadata)
+    """
+    frequency = metadata["access_count"]
+    recency_hours = (datetime.now() - metadata["last_access"]).total_seconds() / 3600
+    
+    # Base score from frequency and recency
+    base_score = frequency / (recency_hours + 1)
+    
+    # Adjust for business priority if available
+    business_priority = metadata.get("business_priority", 1.0)
+    
+    # Lower score = higher eviction priority
+    return 1.0 / (base_score * business_priority + 0.1)
+
+# Create priority-based cache with custom function
+priority_cache = CacheFactory.create_cache(
+    "priority", "gpu", max_capacity=100,
+    priority_func=production_priority_func
+)
+```
+
+#### Custom Strategy Development
+```python
+class AdapterSizeStrategy(BaseCacheStrategy):
+    """
+    Custom strategy that evicts largest adapters first.
+    Useful for maximizing the number of adapters in cache.
+    """
+    
+    def get_eviction_candidates(self, count: int = 1) -> List[str]:
+        """Return largest adapters for eviction."""
+        if not self.cache:
+            return []
+        
+        # Get adapter sizes
+        adapter_sizes = []
+        for key in self.cache.keys():
+            adapter = self.cache[key]
+            size = getattr(adapter, 'memory_usage', 0)
+            adapter_sizes.append((size, key))
+        
+        # Sort by size (largest first) and return top candidates
+        adapter_sizes.sort(reverse=True)
+        return [key for _, key in adapter_sizes[:count]]
+    
+    def update_access_pattern(self, key: str) -> None:
+        """Update access metadata for monitoring."""
+        if key in self.metadata:
+            self.metadata[key]["last_access"] = datetime.now()
+            self.metadata[key]["access_count"] += 1
+
+# Register and use custom strategy
+CacheFactory.register_strategy("size_based", AdapterSizeStrategy)
+
+config = MemoryConfig(
+    gpu_cache_strategy="size_based",
+    cpu_cache_strategy="lru"
+)
+```
+
+#### Strategy Performance Characteristics
+
+| Strategy | Get/Put Time | Eviction Time | Memory Overhead | Best Use Case |
+|----------|-------------|---------------|-----------------|---------------|
+| LRU | O(1) | O(1) | O(n) | Interactive workloads |
+| FIFO | O(1) | O(1) | O(n) | Batch processing |
+| Priority | O(1) | O(n log n) | O(n) | Production systems |
+| Custom | Varies | Varies | Varies | Specialized needs |
+
+#### Monitoring and Tuning
+
+The cache system provides comprehensive metrics for performance tuning:
+
+```python
+# Get cache performance metrics
+gpu_cache = memory_manager.gpu_cache
+metrics = {
+    "hit_rate": gpu_cache.get_hit_rate(),
+    "eviction_rate": gpu_cache.get_eviction_rate(), 
+    "average_access_time": gpu_cache.get_avg_access_time(),
+    "memory_utilization": gpu_cache.get_memory_utilization()
+}
+
+# Automatic strategy recommendation
+recommended_strategy = gpu_cache.recommend_strategy(metrics)
+print(f"Consider switching to {recommended_strategy} for better performance")
+```
+
 The design provides a robust foundation for high-performance LoRA inference with support for multiple variants, intelligent memory management, clean separation of concerns, and comprehensive testing strategies.
+
+## Future Additions
+
+### SGLang Framework Integration
+
+Future integration with SGLang framework for high-performance serving:
+
+**Directory Structure:**
+```
+fd_lora/
+├── sglang/                    # SGLang framework integration
+│   ├── __init__.py
+│   ├── layers.py             # SGLangFDLoraLayer
+│   ├── models.py             # SGLang model integration
+│   └── integration.py        # SGLang-specific integration logic
+```
+
+**Key Features:**
+- Integration with SGLang's batching and scheduling optimizations
+- Maintains SGLang's performance characteristics while adding FD-LoRA optimizations
+- Support for SGLang's continuous batching with LoRA adapter switching
+
+### vLLM Framework Integration
+
+Future integration with vLLM framework for production serving:
+
+**Directory Structure:**
+```
+fd_lora/
+├── vllm/                      # vLLM framework integration
+│   ├── __init__.py
+│   ├── layers.py             # VLLMFDLoraLayer
+│   ├── models.py             # vLLM model integration
+│   └── integration.py        # vLLM-specific integration logic
+```
+
+**Key Features:**
+- Integration with vLLM's PagedAttention mechanism
+- Support for vLLM's continuous batching with dynamic LoRA loading
+- Maintains vLLM's memory efficiency while adding FD-LoRA optimizations
+
+### Tensor Parallelism Support
+
+Future support for tensor parallelism across multiple GPUs:
+
+**Key Features:**
+- Distributed LoRA adapter management across multiple devices
+- Collective communication for adapter synchronization
+- Sharded adapter storage and computation
+- Integration with existing tensor parallel frameworks
+
+### Additional LoRA Variants
+
+Future support for additional LoRA variants:
+
+**Planned Variants:**
+- QLoRA (Quantized LoRA)
+- LoRA+ (improved initialization)
+- AdaLoRA (adaptive rank allocation)
+- Custom variant extensibility
+
+### Enhanced Backends
+
+Future backend implementations:
+
+**Planned Backends:**
+- **Cutlass Backend**: Optimized GEMM operations using NVIDIA Cutlass
+- **ROCm Backend**: Support for AMD GPUs
+- **Intel GPU Backend**: Support for Intel Arc and Data Center GPUs
+
+### Advanced Memory Management
+
+Future memory management enhancements:
+
+**Planned Features:**
+- Cross-node adapter sharing in distributed setups
+- Persistent adapter caching across sessions
+- Intelligent prefetching based on usage patterns
+- Integration with system-level memory management
